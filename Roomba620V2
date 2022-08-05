@@ -1,0 +1,216 @@
+//This version is for the Roomba 600 Series
+//Connect a wire from D4 on the nodeMCU to the BRC pin on the roomba to prevent sleep mode.
+
+#include <PubSubClient.h>
+#include <ESP8266WiFi.h>
+#include <ESP8266mDNS.h>
+#include <SimpleTimer.h>
+#include <Roomba.h>
+#include <WiFiUdp.h>
+#include <ArduinoOTA.h>
+
+#include <Roomba620_SSID.h>
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+SimpleTimer timer;
+Roomba roomba(&Serial, Roomba::Baud115200);
+
+
+// Variables
+bool toggle = true;
+const int noSleepPin = D5;
+bool boot = true;
+long battery_Current_mAh = 0;
+long battery_Voltage = 0;
+long battery_Total_mAh = 0;
+long battery_percent = 0;
+char battery_percent_send[50];
+char battery_Current_mAh_send[50];
+uint8_t tempBuf[10];
+
+//Functions
+
+void setup_wifi() 
+{
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) 
+  {
+    delay(500);
+  }
+}
+
+void reconnect() 
+{
+  // Loop until we're reconnected
+  int retries = 0;
+  while (!client.connected()) 
+  {
+    if(retries < 50)
+    {
+      // Attempt to connect
+      if (client.connect(mqtt_client_name, mqtt_user, mqtt_pass, "roomba/status", 0, 0, "Dead Somewhere")) 
+      {
+        // Once connected, subscribe
+        client.subscribe("roomba/command");
+      } 
+      else 
+      {
+        retries++;
+        // Wait 5 seconds before retrying
+        delay(5000);
+      }
+    }
+    if(retries >= 50)
+    {
+    ESP.restart();
+    }
+  }
+}
+
+void callback(char* topic, byte* payload, unsigned int length) 
+{
+  String newTopic = topic;
+  payload[length] = '\0';
+  String newPayload = String((char *)payload);
+  if (newTopic == "Roomba/command") 
+  {
+    if (newPayload == "start")
+    {
+      startCleaning();
+    }
+    if (newPayload == "return_to_base")
+    {
+      stopCleaning();
+    }
+  }
+}
+
+
+void startCleaning()
+{
+  Serial.write(128);
+  delay(50);
+  Serial.write(131);
+  delay(50);
+  Serial.write(135);
+  client.publish("roomba/status", "Sto pulendo");
+}
+
+void stopCleaning()
+{
+  Serial.write(128);
+  delay(50);
+  Serial.write(131);
+  delay(50);
+  Serial.write(143);
+  client.publish("roomba/status", "Torno a casa");
+}
+
+void sendInfoRoomba()
+{
+  roomba.start(); 
+  roomba.getSensors(21, tempBuf, 1);
+  battery_Voltage = tempBuf[0];
+  Serial.print("Voltaggio ");
+  Serial.println(battery_Voltage);
+  delay(50);
+  roomba.getSensors(25, tempBuf, 2);
+  battery_Current_mAh = tempBuf[1]+256*tempBuf[0];
+  Serial.print("Mah ");
+  Serial.println(battery_Current_mAh);
+  delay(50);
+  roomba.getSensors(26, tempBuf, 2);
+  battery_Total_mAh = tempBuf[1]+256*tempBuf[0];
+  Serial.print("Total Mah ");
+  Serial.println(battery_Total_mAh);
+  if(battery_Total_mAh != 0)
+  {
+    int nBatPcent = 100*battery_Current_mAh/battery_Total_mAh;
+    String temp_str2 = String(nBatPcent);
+    temp_str2.toCharArray(battery_percent_send, temp_str2.length() + 1); //packaging up the data to publish to mqtt
+    client.publish("roomba/battery", battery_percent_send);
+  }
+  if(battery_Total_mAh == 0)
+  {  
+    client.publish("roomba/battery", "NO DATA");
+  }
+  String temp_str = String(battery_Voltage);
+  temp_str.toCharArray(battery_Current_mAh_send, temp_str.length() + 1); //packaging up the data to publish to mqtt
+  client.publish("roomba/status", "Alla base");
+}
+
+void stayAwakeLow()
+{
+  digitalWrite(noSleepPin, LOW);
+  timer.setTimeout(1000, stayAwakeHigh);
+}
+
+void stayAwakeHigh()
+{
+  digitalWrite(noSleepPin, HIGH);
+}
+
+
+
+void setup() 
+{
+  pinMode(noSleepPin, OUTPUT);
+  digitalWrite(noSleepPin, HIGH);
+  Serial.begin(115200);
+  setup_wifi();
+  
+  // Hostname defaults to esp8266-[ChipID]
+  ArduinoOTA.setHostname("Roomba620");
+
+  // No authentication by default
+  // ArduinoOTA.setPassword((const char *)"123");
+
+  ArduinoOTA.onStart([]() {
+    Serial.println("Start");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("\nEnd");
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+  });
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+    else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+    else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+    else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+    else if (error == OTA_END_ERROR) Serial.println("End Failed");
+  });
+  ArduinoOTA.begin();
+
+  
+  Serial.println("Ready");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  
+  delay(500);
+  Serial.swap();
+  delay(500);
+  Serial.write(129);
+  delay(50);
+  Serial.write(11);
+  delay(50);
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+  timer.setInterval(5000, sendInfoRoomba);
+  timer.setInterval(60000, stayAwakeLow);
+}
+
+void loop() 
+{
+  ArduinoOTA.handle();
+  if (!client.connected()) 
+  {
+    reconnect();
+  }
+  client.loop();
+  timer.run();
+}
